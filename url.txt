@@ -1,0 +1,4 @@
+输入音乐的路径 仅示例，后续自行修改
+
+Windows系统格式：D:\Users\30925\Music
+Linux系统格式：/root/data/Music
