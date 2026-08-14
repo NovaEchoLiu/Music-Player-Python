@@ -1,4 +1,4 @@
-# Music Player for Python 版 v1.4
+# Music Player for Python 版 v1.5
 # 使用Python编写。需要Cloudflare workerss JavaScript版本：https://github.com/NovaEchoLiu/Music-Player-CFworkers
 import os
 import base64
@@ -15,7 +15,20 @@ import uvicorn
 import mutagen
 from mutagen.id3 import ID3, APIC, USLT
 import io
+import json
 from PIL import Image
+
+def get_offsets_file() -> Path:
+    return Path(__file__).resolve().parent / "lyric_offsets.json"
+
+def get_lyric_offsets() -> dict:
+    f = get_offsets_file()
+    if f.exists():
+        try:
+            return json.loads(f.read_text(encoding="utf-8"))
+        except:
+            return {}
+    return {}
 
 def get_password() -> str:
     pwd_file = Path(__file__).resolve().parent / "access_password.txt"
@@ -187,6 +200,7 @@ async def get_song_list(request: Request):
     if not music_dir.exists():
         return JSONResponse(status_code=500, content={"error": f"音乐文件夹不存在: {music_dir}"})
     
+    offsets = get_lyric_offsets()
     songs = []
     audio_extensions = {".mp3", ".flac", ".m4a", ".wav", ".aac"}
     
@@ -204,11 +218,26 @@ async def get_song_list(request: Request):
                 "album": meta["album"],
                 "rel_path": rel_path,
                 "url": f"/stream/{quote(rel_path, safe='/')}",
-                "date": meta["date"]
+                "date": meta["date"],
+                "offset": offsets.get(rel_path, 0.0)
             })
             
     songs.sort(key=lambda x: x["name"])
     return JSONResponse(content=songs)
+
+@app.post("/set_offset")
+async def set_offset(request: Request):
+    if not is_authorized(request):
+        return Response("Unauthorized", status_code=401)
+    data = await request.json()
+    rel_path = data.get("rel_path")
+    offset = data.get("offset", 0.0)
+    if rel_path:
+        f = get_offsets_file()
+        offsets = get_lyric_offsets()
+        offsets[rel_path] = offset
+        f.write_text(json.dumps(offsets, ensure_ascii=False), encoding="utf-8")
+    return JSONResponse({"success": True})
 
 @app.get("/stream/{file_path:path}")
 async def stream_file(file_path: str, request: Request):
@@ -356,8 +385,21 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         #progress-bar { width: 100%; height: 5px; -webkit-appearance: none; appearance: none; background-color: #e2e8f0; border-radius: 3px; outline: none; margin: 2px 0 6px 0; }
         #progress-bar::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 16px; height: 16px; background-color: #3b82f6; border-radius: 50%; border: 2px solid #ffffff; box-shadow: 0 2px 6px rgba(59,130,246,0.4); }
         #controls { display: flex; align-items: center; justify-content: center; }
+        .ctrl-wrap { position: relative; display: flex; align-items: center; justify-content: center; }
         .ctrl-btn { background: none; border: none; padding: 0; width: 44px; height: 44px; cursor: pointer; color: #334155; text-align: center; outline: none; border-radius: 50%; }
         .ctrl-btn:active { background-color: rgba(0,0,0,0.05); transform: scale(0.92); }
+        .bubble-pop { display: none; position: absolute; bottom: 100%; margin-bottom: 8px; background: #ffffff; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); border: 1px solid #e2e8f0; z-index: 20; align-items: center; justify-content: center; padding: 8px; }
+        .bubble-pop::after { content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%); border-width: 6px; border-style: solid; border-color: #ffffff transparent transparent transparent; }
+        .lyric-bubble { flex-direction: row; gap: 8px; width: 110px; }
+        .lyric-bubble button { background: #f1f5f9; border: none; border-radius: 4px; width: 24px; height: 24px; cursor: pointer; display: flex; align-items: center; justify-content: center; color: #475569; }
+        .lyric-bubble span { font-size: 13px; color: #1e293b; font-weight: 500; min-width: 34px; text-align: center; }
+        .vol-bubble { flex-direction: column; width: 36px; height: 100px; }
+        .vol-slider { -webkit-appearance: slider-vertical; appearance: slider-vertical; width: 4px; height: 100%; margin: 0; background-color: #e2e8f0; outline: none; }
+        body.dark-mode .bubble-pop { background: #1e293b; border-color: #2d3a4f; }
+        body.dark-mode .bubble-pop::after { border-color: #1e293b transparent transparent transparent; }
+        body.dark-mode .lyric-bubble button { background: #0f172a; color: #cbd5e1; }
+        body.dark-mode .lyric-bubble span { color: #f1f5f9; }
+        body.dark-mode .vol-slider { background-color: #0f172a; }
         .ctrl-btn.play-btn { color: #3b82f6; }
         .ctrl-btn svg { width: 28px; height: 28px; display: inline-block; fill: currentColor; vertical-align: middle; }
         #fullscreen-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 999; display: none; align-items: center; justify-content: center; background-color: rgba(0,0,0,0.3); }
@@ -464,6 +506,16 @@ HTML_CONTENT = r"""<!DOCTYPE html>
             </div>
             <input type="range" id="progress-bar" min="0" max="100" value="0" step="1">
             <div id="controls">
+                <div class="ctrl-wrap" style="margin-right: 12px;">
+                    <button class="ctrl-btn" onclick="toggleBubble(event, 'lyric-bubble')">
+                        <svg viewBox="0 0 24 24" fill="currentColor" style="width: 22px; height: 22px;"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8z"/><path d="M12.5 7H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>
+                    </button>
+                    <div id="lyric-bubble" class="bubble-pop lyric-bubble" onclick="event.stopPropagation()">
+                        <button onclick="adjLyricOffset(-0.5)">◄</button>
+                        <span id="lyric-offset-txt">0.0s</span>
+                        <button onclick="adjLyricOffset(0.5)">►</button>
+                    </div>
+                </div>
                 <button class="ctrl-btn mode-btn" id="mode-btn" onclick="toggleMode()" style="font-size: 20px; margin-right: 12px;">🔁</button>
                 <button class="ctrl-btn prev-btn" onclick="prevSong()" style="margin-right:12px;">
                     <svg viewBox="0 0 24 24"><path d="M6 6h2v12H6V6zm3.5 6l8.5 6V6l-8.5 6z"/></svg>
@@ -475,6 +527,14 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 <button class="ctrl-btn next-btn" onclick="nextSong()" style="margin-left:12px;">
                     <svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
                 </button>
+                <div class="ctrl-wrap" style="margin-left: 12px;">
+                    <button class="ctrl-btn" onclick="toggleBubble(event, 'vol-bubble')">
+                        <svg viewBox="0 0 24 24" fill="currentColor" style="width: 22px; height: 22px;"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+                    </button>
+                    <div id="vol-bubble" class="bubble-pop vol-bubble" onclick="event.stopPropagation()">
+                        <input type="range" class="vol-slider" min="0" max="1" step="0.01" value="1" oninput="adjVolume(this.value)">
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -512,6 +572,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         
         var viewMode = localStorage.getItem('player-view-mode') || 'list'; // 'list' | 'grid'
         var isSubViewActive = false;
+        var lyricOffset = 0;
         
         var sim = { active: false, currentTime: 0, duration: 120, timer: null };
         var lyrics = []; var hasLyrics = false;
@@ -810,7 +871,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
         function scrollToCurrentLyric() {
             if (!hasLyrics) return;
-            var t = sim.active ? sim.currentTime : (audio.currentTime || 0);
+            var t = (sim.active ? sim.currentTime : (audio.currentTime || 0)) + lyricOffset;
             var idx = getCurrentLyricIndex(t);
             var lines = fullscreenLyrics.getElementsByClassName('lyric-line');
             for (var i = 0; i < lines.length; i++) { lines[i].className = (i === idx) ? 'lyric-line active' : 'lyric-line'; }
@@ -833,7 +894,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
                 var lyricBar = document.getElementById('lyric-bar');
                 if (!hasLyrics) { lyricBar.innerHTML = ICONS.music + ' 暂无歌词'; } 
                 else {
-                    var idx = getCurrentLyricIndex(current);
+                    var idx = getCurrentLyricIndex(current + lyricOffset);
                     lyricBar.innerHTML = (idx >= 0 && idx < lyrics.length) ? lyrics[idx].text : lyrics[0].text;
                 }
             }
@@ -842,7 +903,10 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         function playSongByIndex(index) {
             if (!rawSongList || rawSongList.length === 0 || index < 0 || index >= rawSongList.length) return;
             currentIndex = index; 
-            var song = rawSongList[index]; 
+            var song = rawSongList[index];
+            lyricOffset = song.offset || 0;
+            var offTxt = document.getElementById('lyric-offset-txt');
+            if (offTxt) offTxt.innerText = (lyricOffset > 0 ? '+' : '') + lyricOffset.toFixed(1) + 's';
             currentNameEl.innerHTML = song.name; 
             updateCoverByRelPath(song.rel_path); 
             
@@ -912,6 +976,36 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         function updatePlayBtn(pl) {
             document.getElementById('play-icon').style.display = pl ? 'none' : 'inline-block';
             document.getElementById('pause-icon').style.display = pl ? 'inline-block' : 'none';
+        }
+
+        function toggleBubble(e, id) {
+            e.stopPropagation();
+            var el = document.getElementById(id);
+            var isDisplay = el.style.display === 'flex';
+            document.querySelectorAll('.bubble-pop').forEach(function(b) { b.style.display = 'none'; });
+            if (!isDisplay) el.style.display = 'flex';
+        }
+
+        document.addEventListener('click', function() {
+            document.querySelectorAll('.bubble-pop').forEach(function(b) { b.style.display = 'none'; });
+        });
+
+        function adjLyricOffset(val) {
+            lyricOffset += val;
+            document.getElementById('lyric-offset-txt').innerText = (lyricOffset > 0 ? '+' : '') + lyricOffset.toFixed(1) + 's';
+            updateUI();
+            if (currentIndex >= 0 && rawSongList[currentIndex]) {
+                var song = rawSongList[currentIndex];
+                song.offset = lyricOffset;
+                var xhr = new XMLHttpRequest();
+                xhr.open('POST', '/set_offset', true);
+                xhr.setRequestHeader('Content-Type', 'application/json');
+                xhr.send(JSON.stringify({rel_path: song.rel_path, offset: lyricOffset}));
+            }
+        }
+
+        function adjVolume(val) {
+            audio.volume = parseFloat(val);
         }
 
         function openSearchModal() { document.getElementById('search-overlay').style.display = 'flex'; document.getElementById('search-input').focus(); }
@@ -1006,4 +1100,4 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 # 启动入口
 # 0.0.0.0 默认允许公网 port=8000 监听8000端口 可自行修改
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="::", port=8000, reload=True)
